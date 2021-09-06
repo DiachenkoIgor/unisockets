@@ -1,4 +1,3 @@
-import WebSocket, { Data } from "isomorphic-ws";
 import { getLogger } from "../../utils/logger";
 import { ClientClosedError } from "../errors/client-closed";
 import { UnimplementedOperationError } from "../errors/unimplemented-operation";
@@ -40,14 +39,25 @@ export class SignalingService {
     }
   }
 
+    protected async sendRaw(
+    client: WebSocket | undefined,
+    operation: string
+  ) {
+    this.logger.debug("Sending", operation);
+
+    if (client) {
+      client.send(operation);
+    } else {
+      throw new ClientClosedError();
+    }
+  }
+
   protected async receive(
-    rawOperation: Data
+    rawOperation: string
   ): Promise<ISignalingOperation<TSignalingData>> {
     this.logger.debug("Receiving", { rawOperation });
 
-    const operation = JSON.parse(
-      rawOperation as string
-    ) as ISignalingOperation<TSignalingData>;
+    const operation = JSON.parse(rawOperation) as ISignalingOperation<TSignalingData>;
 
     this.logger.debug("Received operation", operation);
 

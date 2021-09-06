@@ -1,11 +1,10 @@
-import WebSocket from "isomorphic-ws";
 import { UnimplementedOperationError } from "../errors/unimplemented-operation";
 import { IAcknowledgementData } from "../operations/acknowledgement";
 import { IAliasData } from "../operations/alias";
 import { Answer, IAnswerData } from "../operations/answer";
 import { Candidate, ICandidateData } from "../operations/candidate";
 import { IGoodbyeData } from "../operations/goodbye";
-import { IOfferData, Offer } from "../operations/offer";
+//import { IOfferData, Offer } from "../operations/offer";
 import {
   ESIGNALING_OPCODES,
   ISignalingOperation,
@@ -29,6 +28,7 @@ export class SignalingClient extends SignalingService {
   private id = "";
   private client?: WebSocket;
   private asyncResolver = new Emittery();
+  public isConnected = false;
 
   constructor(
     private address: string,
@@ -39,13 +39,15 @@ export class SignalingClient extends SignalingService {
     private onAcknowledgement: (id: string, rejected: boolean) => Promise<void>,
     private getOffer: (
       answererId: string,
-      handleCandidate: (candidate: string) => Promise<void>
-    ) => Promise<string>,
-    private getAnswer: (
       offererId: string,
-      offer: string,
-      handleCandidate: (candidate: string) => Promise<void>
-    ) => Promise<string>,
+      myId: string
+    ) => void,
+    private getAnswer: (
+      answererId: string,
+      offererId: string,
+      myId: string,
+      offer: string
+    ) => void,
     private onAnswer: (
       offererId: string,
       answererId: string,
@@ -57,7 +59,8 @@ export class SignalingClient extends SignalingService {
       candidate: string
     ) => Promise<void>,
     private onGoodbye: (id: string) => Promise<void>,
-    private onAlias: (id: string, alias: string, set: boolean) => Promise<void>
+    private onAlias: (id: string, alias: string, set: boolean) => Promise<void>,
+    private containsAlias: (clientAlias: string) => boolean,
   ) {
     super();
   }
@@ -108,13 +111,22 @@ export class SignalingClient extends SignalingService {
   async accept(alias: string): Promise<string> {
     this.logger.debug("Accepting", { id: this.id, alias });
 
-    return new Promise(async (res) => {
+    return new Promise(async (res, rej) => {
       (async () => {
         const clientAlias = await this.asyncResolver.once(
           this.getAcceptKey(alias)
         );
+        let set = true;
 
-        res(clientAlias as string);
+        if(!this.containsAlias(clientAlias))
+          set = await this.asyncResolver.once(clientAlias);
+
+        set
+          ? res(clientAlias as string) 
+          : rej(
+              "Accepting failed!!!"
+            ); 
+       
       })();
 
       await this.send(this.client, new Accepting({ id: this.id, alias }));
@@ -214,6 +226,10 @@ export class SignalingClient extends SignalingService {
     await this.send(this.client, candidate);
   }
 
+  public async handleSend(msg: string){
+    await this.sendRaw(this.client, msg);
+  }
+
   private async handleOperation(
     operation: ISignalingOperation<TSignalingData>
   ) {
@@ -234,6 +250,7 @@ export class SignalingClient extends SignalingService {
         const data = operation.data as IAcknowledgementData;
 
         this.id = data.id;
+        this.isConnected = true;
 
         this.logger.debug("Received acknowledgement", { id: this.id });
 
@@ -245,35 +262,7 @@ export class SignalingClient extends SignalingService {
       case ESIGNALING_OPCODES.GREETING: {
         const data = operation.data as IGreetingData;
 
-        const offer = await this.getOffer(
-          data.answererId,
-          async (candidate: string) => {
-            await this.sendCandidate(
-              new Candidate({
-                offererId: data.offererId,
-                answererId: data.answererId,
-                candidate,
-              })
-            );
-
-            this.logger.debug("Sent candidate", data);
-          }
-        );
-
-        await this.send(
-          this.client,
-          new Offer({
-            offererId: this.id,
-            answererId: data.answererId,
-            offer,
-          })
-        );
-
-        this.logger.debug("Sent offer", {
-          offererId: this.id,
-          answererId: data.answererId,
-          offer,
-        });
+        this.getOffer(data.answererId, data.offererId, this.id);
 
         break;
       }
@@ -284,35 +273,10 @@ export class SignalingClient extends SignalingService {
         this.logger.debug("Received offer", data);
 
         const answer = await this.getAnswer(
+          data.answererId,
           data.offererId,
-          data.offer,
-          async (candidate: string) => {
-            await this.sendCandidate(
-              new Candidate({
-                offererId: data.answererId,
-                answererId: data.offererId,
-                candidate,
-              })
-            );
-
-            this.logger.debug("Sent candidate", data);
-          }
-        );
-
-        await this.send(
-          this.client,
-          new Answer({
-            offererId: data.offererId,
-            answererId: this.id,
-            answer,
-          })
-        );
-
-        this.logger.debug("Sent answer", {
-          offererId: data.offererId,
-          answererId: this.id,
-          answer,
-        });
+          this.id,
+          data.offer)
 
         break;
       }
@@ -352,6 +316,7 @@ export class SignalingClient extends SignalingService {
           await this.onAlias(data.id, data.alias, data.set);
         } else {
           await this.notifyBindAndShutdown(data.id, data.alias, data.set);
+          this.asyncResolver.emit(data.alias, data.set);
           await this.onAlias(data.id, data.alias, data.set);
         }
 

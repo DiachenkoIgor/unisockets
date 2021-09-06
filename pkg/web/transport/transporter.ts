@@ -64,7 +64,7 @@ export class Transporter {
       await this.onChannelOpen(answererId);
     };
     channel.onmessage = async (msg) => {
-      await this.queueAndEmitMessage(answererId, msg.data);
+      msg.data.arrayBuffer().then(buffer => {this.queueAndEmitMessage(answererId, buffer);});
     };
     channel.onclose = async () => {
       this.logger.debug("Channel close", { id: answererId });
@@ -139,7 +139,7 @@ export class Transporter {
         await this.onChannelOpen(id);
       };
       channel.onmessage = async (msg) => {
-        await this.queueAndEmitMessage(id, msg.data);
+        msg.data.arrayBuffer().then(buffer => {this.queueAndEmitMessage(id, buffer);});
       };
       channel.onclose = async () => {
         this.logger.debug("Channel close", { id });

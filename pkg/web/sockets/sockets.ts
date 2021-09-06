@@ -36,6 +36,9 @@ interface ISocketImports {
     messagePointer: number,
     messagePointerLength: number
   ) => Promise<number>;
+    unisockets_close: (
+    fd: number
+  ) => Promise<void>;
 }
 
 export class Sockets {
@@ -48,10 +51,13 @@ export class Sockets {
     private externalAccept: (alias: string) => Promise<string>,
     private externalConnect: (alias: string) => Promise<void>,
     private externalSend: (alias: string, msg: Uint8Array) => Promise<void>,
-    private externalRecv: (alias: string) => Promise<Uint8Array>
+    private externalRecv: (alias: string) => Promise<Uint8Array>,
+    private externalClose: (alias: string) => Promise<void>,
+    private externalSocket: () => Promise<number>,
+    private isConnected: () => boolean
   ) {}
 
-  async getImports(): Promise<{ memoryId: string; imports: ISocketImports }> {
+  getImports(): { memoryId: string; imports: ISocketImports } {
     this.logger.debug("Getting imports");
 
     const memoryId = v4();
@@ -59,8 +65,14 @@ export class Sockets {
     return {
       memoryId,
       imports: {
-        unisockets_socket: async () => {
-          return await this.socket();
+        unisockets_socket: async  () => {
+          if(!this.isConnected())
+            await self.asyncResolver.once("ready");
+
+        return await this.socket();
+        },
+        unisockets_close: async  (fd: number) => {
+            await this.close(fd);
         },
         unisockets_bind: async (
           fd: number,
@@ -68,17 +80,19 @@ export class Sockets {
           addressLength: number
         ) => {
           try {
+           
             const memory = await this.accessMemory(memoryId);
-
             const socketInMemory = memory.slice(
               addressPointer,
               addressPointer + addressLength
             );
 
+
             const addressInMemory = socketInMemory.slice(4, 8);
             const portInMemory = socketInMemory.slice(2, 4);
 
             const address = addressInMemory.join(".");
+
             const port = htons(new Uint16Array(portInMemory.buffer)[0]);
 
             await this.bind(fd, `${address}:${port}`);
@@ -140,6 +154,7 @@ export class Sockets {
           addressLength: number
         ) => {
           try {
+
             const memory = await this.accessMemory(memoryId);
 
             const socketInMemory = memory.slice(
@@ -215,7 +230,7 @@ export class Sockets {
   private async socket() {
     this.logger.silly("Handling `socket`");
 
-    const fd = this.binds.size + 1;
+    const fd = await this.externalSocket();
 
     this.binds.set(fd, "");
 
@@ -238,6 +253,7 @@ export class Sockets {
     await this.ensureBound(serverFd);
 
     const clientFd = await this.socket();
+
     const clientAlias = await this.externalAccept(this.binds.get(serverFd)!); // ensureBound
 
     this.binds.set(clientFd, clientAlias);
@@ -264,6 +280,14 @@ export class Sockets {
     await this.ensureBound(fd);
 
     await this.externalSend(this.binds.get(fd)!, msg); // ensureBound
+  }
+
+  private async close(fd: number) {
+    this.logger.silly("Handling `close`", {fd});
+
+    await this.ensureBound(fd);
+
+    await this.externalClose(this.binds.get(fd)!); // ensureBound
   }
 
   private async recv(fd: number) {
