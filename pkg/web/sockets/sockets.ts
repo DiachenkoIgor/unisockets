@@ -54,8 +54,11 @@ export class Sockets {
     private externalRecv: (alias: string) => Promise<Uint8Array>,
     private externalClose: (alias: string) => Promise<void>,
     private externalSocket: () => Promise<number>,
-    private isConnected: () => boolean
-  ) {}
+    private isConnected: () => boolean,
+    private notifyBindSet: (fd: number, alias: string) => void
+  ) {
+      this.binds = self.bindsHolder;
+  }
 
   getImports(): { memoryId: string; imports: ISocketImports } {
     this.logger.debug("Getting imports");
@@ -66,10 +69,7 @@ export class Sockets {
       memoryId,
       imports: {
         unisockets_socket: async  () => {
-          if(!this.isConnected())
-            await self.asyncResolver.once("ready");
-
-        return await this.socket();
+          return await this.socket();
         },
         unisockets_close: async  (fd: number) => {
             await this.close(fd);
@@ -227,6 +227,11 @@ export class Sockets {
     };
   }
 
+  private setBind(fd: number, alias: string){
+    this.binds.set(fd, alias);
+
+    this.notifyBindSet(fd, alias);
+  }
   private async socket() {
     this.logger.silly("Handling `socket`");
 
@@ -244,7 +249,7 @@ export class Sockets {
 
     await this.externalBind(alias);
 
-    this.binds.set(fd, alias);
+    this.setBind(fd, alias);
   }
 
   private async accept(serverFd: number) {
@@ -256,7 +261,7 @@ export class Sockets {
 
     const clientAlias = await this.externalAccept(this.binds.get(serverFd)!); // ensureBound
 
-    this.binds.set(clientFd, clientAlias);
+    this.setBind(clientFd, clientAlias);
 
     return {
       clientFd,
@@ -269,7 +274,7 @@ export class Sockets {
 
     await this.ensureBound(serverFd);
 
-    this.binds.set(serverFd, alias);
+    this.setBind(serverFd, alias);
 
     await this.externalConnect(alias);
   }

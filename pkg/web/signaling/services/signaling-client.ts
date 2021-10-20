@@ -117,15 +117,12 @@ export class SignalingClient extends SignalingService {
           this.getAcceptKey(alias)
         );
         let set = true;
-
         if(!this.containsAlias(clientAlias))
           set = await this.asyncResolver.once(clientAlias);
 
         set
           ? res(clientAlias as string) 
-          : rej(
-              "Accepting failed!!!"
-            ); 
+          : rej("Accepting failed!!!");
        
       })();
 

@@ -11,6 +11,19 @@ import { Candidate, ICandidateData } from "../../pkg/web/signaling/operations/ca
 import { IOfferData, Offer } from "../../pkg/web/signaling/operations/offer";
 import { Answer, IAnswerData } from "../../pkg/web/signaling/operations/answer";
 
+self.handleBindUpdate = async function (fd, alias) {
+    console.error("handleBindUpdate - " + fd + "  " + alias);
+    wasmModule.socketBinds.set(fd, alias);
+};
+
+self.handleAliasUpdate = async function (id, alias, isDelete) {
+    console.error("handleAliasUpdate - " + id + "  " + alias + "  " + isDelete);
+    if(!isDelete)
+        wasmModule.socketAliases.set(alias, id);
+    else
+        wasmModule.socketAliases.delete(alias);
+};
+
 self.handleSocketDescriptor = async function (id, requestId) {
     self.socketDescriptors++;
 
@@ -104,6 +117,9 @@ self.handleCandidate = async function (offererId, candidate) {
 
 
 self.createTransporter = function () {
+
+    wasmModule.socketBinds = new Map<number, string>();
+    wasmModule.socketAliases = new Map<string, string>();
 
     const transporterConfig: ExtendedRTCConfiguration = {
   iceServers: [
