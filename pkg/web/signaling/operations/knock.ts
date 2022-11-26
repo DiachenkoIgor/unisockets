@@ -1,7 +1,8 @@
 import { ESIGNALING_OPCODES, ISignalingOperation } from "./operation";
 
 export interface IKnockData {
-  subnet: string;
+  subnet: string,
+  parentWs: string;
 }
 
 export class Knock implements ISignalingOperation<IKnockData> {

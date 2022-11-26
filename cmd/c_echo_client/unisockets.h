@@ -40,25 +40,24 @@ typedef struct sockaddr sockaddr;
 typedef struct sockaddr_in sockaddr_in;
 typedef struct in_addr in_addr;
 
-#ifndef UNISOCKETS_WITH_INVERSE_ALIAS
-int unisockets_socket(int, int, int);
-int unisockets_connect(int, const struct sockaddr *, socklen_t);
-ssize_t unisockets_send(int, const void *, size_t, int);
-ssize_t unisockets_recv(int, void *, size_t, int);
-int unisockets_bind(int, const struct sockaddr *, socklen_t);
-int unisockets_listen(int, int);
-int unisockets_accept(int, struct sockaddr *, socklen_t *);
-#endif
+extern "C" int unisockets_socket(int, int, int);
+extern "C" int unisockets_connect(int, const struct sockaddr *, socklen_t);
+extern "C" ssize_t unisockets_send(int, const void *, size_t, int);
+extern "C" ssize_t unisockets_recv(int, void *, size_t, int);
+extern "C" int unisockets_bind(int, const struct sockaddr *, socklen_t);
+extern "C" int unisockets_listen(int, int);
+extern "C" int unisockets_accept(int, struct sockaddr *, socklen_t *);
+extern "C" int unisockets_getsockname(int, const struct sockaddr *, socklen_t);
 
-#ifdef UNISOCKETS_WITH_ALIAS
-#define socket unisockets_socket
+
+/*#define socket unisockets_socket
 #define connect unisockets_connect
 #define send unisockets_send
 #define recv unisockets_recv
 #define bind unisockets_bind
 #define listen unisockets_listen
-#define accept unisockets_accept
-#endif
+#define accept unisockets_accept*/
+
 
 #ifdef UNISOCKETS_WITH_INVERSE_ALIAS
 #define unisockets_socket socket

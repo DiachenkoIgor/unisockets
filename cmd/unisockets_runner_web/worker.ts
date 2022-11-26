@@ -5,7 +5,30 @@ import Emittery from "emittery";
 import { AliasDoesNotExistError } from "../../pkg/web/signaling/errors/alias-does-not-exist";
 import { SignalingClient } from "../../pkg/web/signaling/services/signaling-client";
 import { Sockets } from "../../pkg/web/sockets/sockets";
+import { Bind } from "../../pkg/web/sockets/bind";
 import { getLogger } from "../../pkg/web/utils/logger";
+
+self.log = function(str) {
+    console.error(self.thread_id + " " + str);
+}
+
+self.onNotifyBindAdd = function (fd, alias, connectorId) {
+
+    if(self.sockets != undefined && !self.sockets.binds.has(fd))
+        self.sockets.binds.set(fd, new Bind(alias, connectorId));
+};
+
+self.onNotifyAliasAdd = function (alias, id, isDelete) {
+    var sgTm= self.signalingClient == undefined ? "" : self.signalingClient.id;
+
+    if(self.aliasesHolder == undefined || self.aliasesHolder.has(alias) && !isDelete)
+        return
+
+    if(!isDelete)
+        self.aliasesHolder.set(alias, id);
+    else
+        self.aliasesHolder.delete(alias);
+};
 
 self.sendWRTCconfig = function (msg) {
     self.signalingClient.handleSend(msg);
@@ -13,7 +36,7 @@ self.sendWRTCconfig = function (msg) {
 
 self.asyncResolver = new Emittery();
 
-self.createUnisocket = function (module) {
+self.createUnisocket = function () {
 
     const signalingServerConnectAddress = "ws://127.0.0.1:8892";
     const reconnectTimeout = 1000;
@@ -45,12 +68,13 @@ const getOffer = function (
   offererId: string,
   myId: string
 ) {
+
     postMessage({
    "cmd": "getOffer",
    "answererId": answererId,
    "offererId": offererId,
    "myId": myId,
-   "threadId": Module['_pthread_self']()
+   "threadId": self.thread_id
     });
 };
 const handleOffer = async (
@@ -65,7 +89,7 @@ const handleOffer = async (
    "offererId": offererId,
    "myId": myId,
    "offer": offer,
-   "threadId": Module['_pthread_self']()
+   "threadId": self.thread_id
     });
 };
 const handleAnswer = async (
@@ -99,14 +123,12 @@ const handleGoodbye = async (id: string) => {
 };
 
 const updateAlias =  (id: string, alias: string, isDelete: boolean) => {
-    postMessage({cmd: 'aliasUpdate', id: Module['_pthread_self'](), id_param: id, alias: alias, delete: isDelete});
+    postMessage({cmd: 'aliasUpdate', idP: self.thread_id, id_param: id, alias: alias, delete: isDelete});
 };
 
 const handleAlias = async (id: string, alias: string, set: boolean) => {
-  logger.debug("Handling alias", { id });
-
   if (set) {
-    logger.verbose("Setting alias", { id, alias });
+    logger.debug("Setting alias", {id, alias, set });
 
     self.aliasesHolder.set(alias, id);
 
@@ -116,7 +138,7 @@ const handleAlias = async (id: string, alias: string, set: boolean) => {
       aliases: JSON.stringify(Array.from(self.aliasesHolder)),
     });
   } else {
-    logger.verbose("Removing alias", { id, alias });
+    logger.silly("Removing alias", { id, alias });
 
     self.aliasesHolder.delete(alias);
 
@@ -132,8 +154,8 @@ const handeIsAliasContains =  (alias: string) => {
     return self.aliasesHolder.has(alias);
 };
 
-const notifyBindSet =  (fd: number, alias: string) => {
-    postMessage({cmd: 'bindUpdate', id: Module['_pthread_self'](), fd: fd, alias: alias});
+const notifyBindSet =  (fd: number, bind: Bind) => {
+    postMessage({cmd: 'bindUpdate', id: self.thread_id, fd: fd, alias: bind.alias, connectorId: bind.connectorId});
 };
 
 const signalingClient = new SignalingClient(
@@ -166,7 +188,7 @@ const signalingClient = new SignalingClient(
             alias
         });
 
-        await signalingClient.bind(alias);
+        return await signalingClient.bind(alias);
     };
 
     const handleExternalAccept = async (alias: string) => {
@@ -181,8 +203,7 @@ const signalingClient = new SignalingClient(
         logger.verbose("Handling external connect", {
             alias
         });
-
-        await signalingClient.connect(alias);
+        return await signalingClient.connect(alias);
     };
 
     const handleExternalSocket = async () => {
@@ -191,39 +212,52 @@ const signalingClient = new SignalingClient(
             self.signalingClient.open();
             await self.asyncResolver.once("ready");
         }
-
         var requestId =  v4();
 
-        postMessage({cmd: 'socketDescriptor', id: Module['_pthread_self'](), requestId: requestId});
-
+        postMessage({cmd: 'socketDescriptor', id: self.thread_id, requestId: requestId});
         return await self.asyncResolver.once(requestId);
+
     };
 
-    const handleExternalSend = async (alias: string, msg: Uint8Array) => {
-        logger.verbose("Handling external send", {
-            alias,
-            msg
+    const updateBinds = async () => {
+        var requestId =  v4();
+
+        postMessage({cmd: 'fetchBinds', id: self.thread_id, requestId: requestId});
+
+        var tmp = await self.asyncResolver.once(requestId);
+
+        tmp.aliases.forEach(function(value, key) {
+              self.aliasesHolder.set(key, value);
         });
+
+        return tmp.binds;
+    };
+
+    const handleExternalSend = async (alias: string, connectorId: string, msg: Uint8Array) => {
+var t = self.aliasesHolder.has(alias);
+
         if (self.aliasesHolder.has(alias)) {
             var requestId =  v4();
 
-            postMessage({cmd: 'wrtcSend', id: Module['_pthread_self'](), alias: self.aliasesHolder.get(alias) !, msg: msg, requestId: requestId});
-
+            postMessage({cmd: 'wrtcSend', id: self.thread_id, remoteId: self.aliasesHolder.get(alias) !, localId: connectorId, msg: msg, requestId: requestId});
             await self.asyncResolver.once(requestId);
+
         } else {
+
             logger.error("Could not find alias", {
                 alias
             });
         }
     };
 
-    const handleExternalRecv = async (alias: string) => {
+    const handleExternalRecv = async (alias: string, connectorId: string) => {
+        console.error("handle external RECV - " + self.aliasesHolder.has(alias));
         if (self.aliasesHolder.has(alias)) {
-            postMessage({cmd: 'wrtcRecv', id: Module['_pthread_self'](), alias: self.aliasesHolder.get(alias) !});
+            postMessage({cmd: 'wrtcRecv', id: self.thread_id, remoteId: self.aliasesHolder.get(alias) !, localId: connectorId});
 
             const msg = await self.asyncResolver.once(self.aliasesHolder.get(alias));
 
-            logger.verbose("Handling external recv", {
+            logger.debug("Handling external recv", {
                 alias,
                 msg
             });
@@ -243,13 +277,24 @@ const signalingClient = new SignalingClient(
         handleExternalClose,
         handleExternalSocket,
         handleExternalIsConnected,
-        notifyBindSet
+        notifyBindSet,
+        updateBinds
     );
 
     self.unisocketImports = sockets.getImports();
+
     self.sockets = sockets;
+    self.unisockets = sockets;
     self.signalingClient = signalingClient;
 
+    self.thread_id = Module['_pthread_self']();
     //signalingClient.open();
 
 }
+
+/*self.safeToCustomThreadHolder = function () {
+    postMessage({
+    "cmd": "safeToCustomThreadHolder",
+   "threadId": Module['_pthread_self']()
+    });
+};*/

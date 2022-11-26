@@ -1,30 +1,28 @@
-import {
-  ExtendedRTCConfiguration,
-  RTCIceCandidate,
-  RTCPeerConnection,
-  RTCSessionDescription,
-} from "wrtc";
 import { ChannelDoesNotExistError } from "../signaling/errors/channel-does-not-exist";
 import { ConnectionDoesNotExistError } from "../signaling/errors/connection-does-not-exist";
 import { SDPInvalidError } from "../signaling/errors/sdp-invalid";
 import { getLogger } from "../utils/logger";
 import Emittery from "emittery";
+import adapter from 'webrtc-adapter';
 
 export class Transporter {
   private logger = getLogger();
   private connections = new Map<string, RTCPeerConnection>();
-  private channels = new Map<string, RTCDataChannel>();
-  private queuedMessages = new Map<string, Uint8Array[]>();
+  private channels = new Map<string, Map <string, RTCDataChannel>>();
+  private queuedMessages = new Map<string, Map <string,Uint8Array[]>>();
   private queuedCandidates = new Map<string, string[]>();
   private asyncResolver = new Emittery();
+  private configuration = {iceServers: [{urls: ["turns:turnserver.example.org", "turn:turnserver.example.org"]}]};
 
   constructor(
-    private config: ExtendedRTCConfiguration,
     private onConnectionConnect: (id: string) => Promise<void>,
     private onConnectionDisconnect: (id: string) => Promise<void>,
     private onChannelOpen: (id: string) => Promise<void>,
     private onChannelClose: (id: string) => Promise<void>
-  ) {}
+  ) {
+
+    console.error(adapter.browserDetails.browser);
+  }
 
   async close() {
     this.logger.debug("Closing transporter");
@@ -34,54 +32,97 @@ export class Transporter {
     }
   }
 
+  private addDataChannel(remoteId: string,
+                         localId: string,
+                         channel: RTCDataChannel) {
+      if(!this.channels.has(remoteId))
+        this.channels.set(remoteId, new Map <string, RTCDataChannel>());
+
+      this.channels.get(remoteId).set(localId, channel);
+  }
+  private addQueueMessages(remoteId: string,
+                         localId: string,
+                         msgs: Uint8Array[]) {
+
+      if(!this.queuedMessages.has(remoteId))
+        this.queuedMessages.set(remoteId, new Map <string, Uint8Array[]>());
+
+      this.queuedMessages.get(remoteId).set(localId, msgs);
+  }
+  private dataChannelConfiguration(remoteId: string,
+                                   localId: string,
+                                   channel: RTCDataChannel){
+    this.addDataChannel(remoteId, localId, channel);
+
+    channel.onopen = async () => {
+      await this.asyncResolver.emit(this.getChannelKey(remoteId, localId), true);
+
+      await this.onChannelOpen(remoteId);
+    };
+
+    channel.onmessage = async (msg) => {
+      msg.data.arrayBuffer().then(buffer => {this.queueAndEmitMessage(remoteId, localId, buffer);});
+    };
+
+    channel.onclose = async () => {
+      this.logger.debug("Channel close", { remoteId: remoteId, localId: localId });
+
+      await this.onChannelClose(remoteId);
+    };
+
+    if(this.queuedMessages.has(remoteId)
+          && this.queuedMessages.get(remoteId).has(localId)
+          && this.queuedMessages.get(remoteId).get(localId).length !=0){
+      var values = this.queuedMessages.get(remoteId).get(localId);
+      this.addQueueMessages(remoteId, localId, values);
+    }else {
+      this.addQueueMessages(remoteId, localId, []);
+    }
+  }
+
   async getOffer(
-    answererId: string,
+    remoteId: string,
+    localId: string,
     handleCandidate: (candidate: string) => Promise<void>
   ) {
-    this.logger.debug("Getting offer", { answererId });
+    this.logger.debug("Create offer", { remoteId, localId});
 
-    const connection = new RTCPeerConnection(this.config);
-    this.connections.set(answererId, connection);
+    if(this.connections.has(remoteId)
+        && this.connections.get(remoteId).connectionState != "closed"){
+
+      if(this.channels.get(remoteId) == undefined 
+        || this.channels.get(remoteId).get(localId) == undefined){
+            const channel = this.connections.get(remoteId).createDataChannel(localId);
+            this.logger.debug("Creation Data Channel", { remoteId, localId});
+            this.dataChannelConfiguration(remoteId, localId, channel);
+      }
+      throw "Connection already exist for localId - " + localId + "; remoteId - " + remoteId;
+    }
+      
+
+    const connection = new RTCPeerConnection();
+    this.connections.set(remoteId, connection);
 
     connection.onconnectionstatechange = async () =>
       await this.handleConnectionStatusChange(
         connection.connectionState,
-        answererId
+        remoteId
       );
 
     connection.onicecandidate = async (e) => {
       e.candidate && handleCandidate(JSON.stringify(e.candidate));
     };
 
-    const channel = connection.createDataChannel("channel");
-    this.channels.set(answererId, channel);
+    const channel = connection.createDataChannel(localId);
 
-    channel.onopen = async () => {
-      this.logger.debug("Channel opened", { id: answererId });
+    this.dataChannelConfiguration(remoteId, localId, channel);
 
-      await this.asyncResolver.emit(this.getChannelKey(answererId), true);
-
-      await this.onChannelOpen(answererId);
+    connection.ondatachannel = async ({ channel }) => {
+      this.dataChannelConfiguration(channel.label, localId, channel);
     };
-    channel.onmessage = async (msg) => {
-      msg.data.arrayBuffer().then(buffer => {this.queueAndEmitMessage(answererId, buffer);});
-    };
-    channel.onclose = async () => {
-      this.logger.debug("Channel close", { id: answererId });
-
-      await this.onChannelClose(answererId);
-    };
-
-    this.queuedMessages.set(answererId, []);
-
-    this.logger.verbose("Created channel", {
-      newChannels: JSON.stringify(Array.from(this.channels.keys())),
-    });
 
     const offer = await connection.createOffer();
     await connection.setLocalDescription(offer);
-
-    this.logger.debug("Created offer", { offer: offer.sdp });
 
     if (offer.sdp === undefined) {
       connection.close();
@@ -89,25 +130,35 @@ export class Transporter {
       throw new SDPInvalidError();
     }
 
-    this.logger.debug("Created connection", {
-      newConnections: JSON.stringify(Array.from(this.connections.keys())),
-    });
-
-    return offer.sdp;
+    return offer.sdp
   }
 
   async handleOffer(
-    id: string,
+    remoteId: string,
+    localId: string,
     offer: string,
     handleCandidate: (candidate: string) => Promise<void>
   ) {
-    this.logger.debug("Handling offer", { id, offer });
+    this.logger.debug("Transporter - Handle offer", { remoteId, localId, offer });
+    if(this.connections.has(remoteId)
+        && this.connections.get(remoteId).connectionState != "closed"){
 
-    const connection = new RTCPeerConnection(this.config);
-    this.connections.set(id, connection);
+      if(this.channels.get(remoteId) == undefined 
+        || this.channels.get(remoteId).get(localId) == undefined){
+            const channel = this.connections.get(remoteId).createDataChannel(localId);
+
+            this.dataChannelConfiguration(remoteId, localId, channel);
+      }
+      throw "Connection already exist for localId - " + localId + "; remoteId - " + remoteId;
+    }
+
+    
+    const connection = new RTCPeerConnection();
+
+    this.connections.set(remoteId, connection);
 
     connection.onconnectionstatechange = async () =>
-      await this.handleConnectionStatusChange(connection.connectionState, id);
+      await this.handleConnectionStatusChange(connection.connectionState, remoteId);
 
     connection.onicecandidate = async (e) => {
       e.candidate && handleCandidate(JSON.stringify(e.candidate));
@@ -122,36 +173,12 @@ export class Transporter {
 
     const answer = await connection.createAnswer();
 
-    this.logger.debug("Created answer", { offer: offer, answer: answer.sdp });
-
     await connection.setLocalDescription(answer);
 
-    await this.addQueuedCandidates(id);
+    await this.addQueuedCandidates(remoteId);
 
     connection.ondatachannel = async ({ channel }) => {
-      this.channels.set(id, channel);
-
-      channel.onopen = async () => {
-        this.logger.debug("Channel opened", { id });
-
-        await this.asyncResolver.emit(this.getChannelKey(id), true);
-
-        await this.onChannelOpen(id);
-      };
-      channel.onmessage = async (msg) => {
-        msg.data.arrayBuffer().then(buffer => {this.queueAndEmitMessage(id, buffer);});
-      };
-      channel.onclose = async () => {
-        this.logger.debug("Channel close", { id });
-
-        await this.onChannelClose(id);
-      };
-
-      this.queuedMessages.set(id, []);
-
-      this.logger.debug("Created channel", {
-        newChannels: JSON.stringify(Array.from(this.channels.keys())),
-      });
+      this.dataChannelConfiguration(channel.label, localId, channel);
     };
 
     this.logger.debug("Created connection", {
@@ -161,12 +188,11 @@ export class Transporter {
     if (answer.sdp === undefined) {
       throw new SDPInvalidError();
     }
-
     return answer.sdp;
   }
 
   async handleAnswer(id: string, answer: string) {
-    this.logger.debug("Handling answer", { id, answer });
+    this.logger.debug("Transporter -  Handling answer", { id, answer });
 
     if (this.connections.has(id)) {
       const connection = this.connections.get(id);
@@ -185,8 +211,7 @@ export class Transporter {
   }
 
   async handleCandidate(id: string, candidate: string) {
-    this.logger.debug("Handling candidate", { id, candidate });
-
+    this.logger.debug("Transporter - Handling candidate", { id, candidate });
     if (
       this.connections.has(id) &&
       this.connections.get(id)!.remoteDescription // We check with `.has` and never push undefined
@@ -225,7 +250,11 @@ export class Transporter {
     if (this.channels.has(id)) {
       this.logger.verbose("Shutting down channel", { id });
 
-      this.channels.get(id)?.close();
+      if(this.channels.has(id)){
+        this.channels.get(id).forEach((value: RTCDataChannel, key: string) => {
+            value.close();
+        });
+      }
 
       this.channels.delete(id);
 
@@ -259,35 +288,40 @@ export class Transporter {
     }
   }
 
-  async send(id: string, msg: Uint8Array) {
-    this.logger.debug("Handling send", { id, msg });
+  async send(remoteId: string, localId: string, msg: Uint8Array) {
+    this.logger.debug("Handling send Transporter", { remoteId, localId});
+    let channel = undefined;
 
-    let channel = this.channels.get(id);
+    if(this.channels.has(remoteId))
+      channel = this.channels.get(remoteId).get(localId);
 
-    while (
+     while (
       !channel ||
       channel!.readyState !== "open" // Checked by !channel
     ) {
-      await this.asyncResolver.once(this.getChannelKey(id));
+      await this.asyncResolver.once(this.getChannelKey(remoteId, localId));
 
-      channel = this.channels.get(id);
+      channel = this.channels.get(remoteId).get(localId);
     }
-
     channel!.send(msg); // We check above
+    this.logger.debug("END SEND!!", { remoteId, localId});
+    
   }
 
-  async recv(id: string) {
-    this.logger.debug("Handling receive", { id });
+  async recv(remoteId: string, localId: string) {
+    this.logger.debug("Handling receive Transporter", { remoteId, localId});
 
     if (
-      this.queuedMessages.has(id) &&
-      this.queuedMessages.get(id)?.length !== 0 // Checked by .has
+      this.queuedMessages.has(remoteId) &&
+      this.queuedMessages.get(remoteId).has(localId) &&
+      this.queuedMessages.get(remoteId).get(localId)?.length !== 0 // Checked by .has
     ) {
-      return this.queuedMessages.get(id)?.shift()!; // size !== 0 and undefined is ever pushed
+      this.logger.debug("Has queued messages!", { remoteId, localId});
+      return this.queuedMessages.get(remoteId).get(localId)?.shift()!; // size !== 0 and undefined is ever pushed
     } else {
-      const msg = await this.asyncResolver.once(this.getMessageKey(id));
-
-      this.queuedMessages.get(id)?.shift();
+      const msg = await this.asyncResolver.once(this.getMessageKey(remoteId, localId));
+      this.logger.debug("Received msg messages!", { remoteId, localId, msg});
+      this.queuedMessages.get(remoteId).get(localId)?.shift();
 
       return msg! as Uint8Array;
     }
@@ -297,7 +331,7 @@ export class Transporter {
     connectionState: string,
     id: string
   ) {
-    this.logger.silly("Handling connection status change", {
+    this.logger.debug("Handling connection status change", {
       connectionState,
       id,
     });
@@ -311,17 +345,19 @@ export class Transporter {
     }
   }
 
-  private async queueAndEmitMessage(id: string, rawMsg: ArrayBuffer) {
-    this.logger.silly("Queueing message", { id, rawMsg });
-
+  private async queueAndEmitMessage(remoteId: string,
+                                    localId: string,
+                                    rawMsg: ArrayBuffer
+                                    ) {
     const msg = new Uint8Array(rawMsg);
+    this.logger.silly("Queueing message", { remoteId, localId, msg});
+    if (this.channels.has(remoteId) &&
+            this.channels.get(remoteId).has(localId)) {
 
-    if (this.channels.has(id)) {
-      const messages = this.queuedMessages.get(id);
+      const messages = this.queuedMessages.get(remoteId).get(localId);
 
       messages?.push(msg);
-
-      await this.asyncResolver.emit(this.getMessageKey(id), msg);
+      await this.asyncResolver.emit(this.getMessageKey(remoteId, localId), msg);
     } else {
       throw new ChannelDoesNotExistError();
     }
@@ -344,15 +380,15 @@ export class Transporter {
     });
   }
 
-  private getMessageKey(id: string) {
-    this.logger.silly("Getting message key", { id });
+  private getMessageKey(remoteId: string, localId: string) {
+    this.logger.silly("Getting message key", { remoteId , localId});
 
-    return `message id=${id}`;
+    return `message remoteId=${remoteId}, localId=${localId}`;
   }
 
-  private getChannelKey(id: string) {
-    this.logger.silly("Getting channel key", { id });
+  private getChannelKey(remoteId: string, localId: string) {
+    this.logger.silly("Getting channel key", { remoteId , localId});
 
-    return `channel id=${id}`;
+    return `channel remoteId=${remoteId}, localId=${localId}`;
   }
 }

@@ -25,10 +25,12 @@ import { IGreetingData } from "../operations/greeting";
 import { Knock } from "../operations/knock";
 
 export class SignalingClient extends SignalingService {
-  private id = "";
+  public id = "";
   private client?: WebSocket;
   private asyncResolver = new Emittery();
   public isConnected = false;
+  private isBinded = false;
+  private acceptsEvents = new Map<string, []>();
 
   constructor(
     private address: string,
@@ -60,9 +62,10 @@ export class SignalingClient extends SignalingService {
     ) => Promise<void>,
     private onGoodbye: (id: string) => Promise<void>,
     private onAlias: (id: string, alias: string, set: boolean) => Promise<void>,
-    private containsAlias: (clientAlias: string) => boolean,
+    private containsAlias: (clientAlias: string) => boolean
   ) {
     super();
+
   }
 
   async open() {
@@ -79,17 +82,18 @@ export class SignalingClient extends SignalingService {
     this.client.onopen = async () => await this.handleConnect();
     this.client.onclose = async () => await this.handleDisconnect();
 
-    this.logger.verbose("Server connected", { address: this.address });
   }
 
-  async close() {
+  close() {
     this.logger.debug("Closing signaling client");
 
     this.client?.terminate && this.client?.terminate(); // `terminate` does not seem to be defined in some browsers
+
+    console.error("signaling client - closed");
   }
 
   async bind(alias: string) {
-    this.logger.debug("Binding", { id: this.id, alias });
+    this.isBinded = true;
 
     return new Promise<void>(async (res, rej) => {
       (async () => {
@@ -109,24 +113,20 @@ export class SignalingClient extends SignalingService {
   }
 
   async accept(alias: string): Promise<string> {
-    this.logger.debug("Accepting", { id: this.id, alias });
-
+    console.error("Send Accept!!");
+    let id_to_send = this.id;
     return new Promise(async (res, rej) => {
       (async () => {
+
         const clientAlias = await this.asyncResolver.once(
           this.getAcceptKey(alias)
         );
-        let set = true;
-        if(!this.containsAlias(clientAlias))
-          set = await this.asyncResolver.once(clientAlias);
 
-        set
-          ? res(clientAlias as string) 
-          : rej("Accepting failed!!!");
+        res(clientAlias as string);
        
       })();
 
-      await this.send(this.client, new Accepting({ id: this.id, alias }));
+      await this.send(this.client, new Accepting({ id: id_to_send, alias }));
     });
   }
 
@@ -138,7 +138,6 @@ export class SignalingClient extends SignalingService {
         const set = await this.asyncResolver.once(
           this.getAliasKey(this.id, alias)
         );
-
         set
           ? rej(
               new ShutdownRejectedError(this.getAliasKey(this.id, alias))
@@ -152,9 +151,17 @@ export class SignalingClient extends SignalingService {
   }
 
   async connect(remoteAlias: string): Promise<string> {
-    this.logger.debug("Connecting", { id: this.id, remoteAlias });
+    this.logger.silly("Connecting", { id: this.id, remoteAlias });
 
-    const clientConnectionId = v4();
+        const clientConnectionId = v4();
+
+/*    if(self.aliasesHolder.has(remoteAlias)){
+          await this.send(
+        this.client,
+        new Connect({ id: this.id, clientConnectionId, remoteAlias })
+      );
+      return self.aliasesHolder.get(remoteAlias);
+    }*/
 
     const clientAlias = await new Promise(async (res, rej) => {
       let i = 0;
@@ -199,7 +206,7 @@ export class SignalingClient extends SignalingService {
   private async handleConnect() {
     this.logger.silly("Server connected", { address: this.address });
 
-    await this.send(this.client, new Knock({ subnet: this.subnet }));
+    await this.send(this.client, new Knock({ subnet: this.subnet , parentWs: self.parentWsId}));
 
     await this.onConnect();
   }
@@ -230,7 +237,7 @@ export class SignalingClient extends SignalingService {
   private async handleOperation(
     operation: ISignalingOperation<TSignalingData>
   ) {
-    this.logger.silly("Handling operation", operation);
+    this.logger.debug("signaling client - Handling operation", operation);
 
     switch (operation.opcode) {
       case ESIGNALING_OPCODES.GOODBYE: {
@@ -256,9 +263,8 @@ export class SignalingClient extends SignalingService {
         break;
       }
 
-      case ESIGNALING_OPCODES.GREETING: {
+      case ESIGNALING_OPCODES.GREETING: {;
         const data = operation.data as IGreetingData;
-
         this.getOffer(data.answererId, data.offererId, this.id);
 
         break;
@@ -266,9 +272,6 @@ export class SignalingClient extends SignalingService {
 
       case ESIGNALING_OPCODES.OFFER: {
         const data = operation.data as IOfferData;
-
-        this.logger.debug("Received offer", data);
-
         const answer = await this.getAnswer(
           data.answererId,
           data.offererId,
@@ -282,7 +285,6 @@ export class SignalingClient extends SignalingService {
         const data = operation.data as IAnswerData;
 
         this.logger.debug("Received answer", data);
-
         await this.onAnswer(data.offererId, data.answererId, data.answer);
 
         break;
@@ -292,7 +294,6 @@ export class SignalingClient extends SignalingService {
         const data = operation.data as ICandidateData;
 
         this.logger.debug("Received candidate", data);
-
         await this.onCandidate(data.offererId, data.answererId, data.candidate);
 
         break;
@@ -300,9 +301,6 @@ export class SignalingClient extends SignalingService {
 
       case ESIGNALING_OPCODES.ALIAS: {
         const data = operation.data as IAliasData;
-
-        this.logger.debug("Received alias", data);
-
         if (data.clientConnectionId) {
           await this.notifyConnect(
             data.clientConnectionId,
@@ -313,7 +311,6 @@ export class SignalingClient extends SignalingService {
           await this.onAlias(data.id, data.alias, data.set);
         } else {
           await this.notifyBindAndShutdown(data.id, data.alias, data.set);
-          this.asyncResolver.emit(data.alias, data.set);
           await this.onAlias(data.id, data.alias, data.set);
         }
 
@@ -323,7 +320,8 @@ export class SignalingClient extends SignalingService {
       case ESIGNALING_OPCODES.ACCEPT: {
         const data = operation.data as IAcceptData;
 
-        this.logger.debug("Received accept", data);
+        if(data.clientId != undefined)
+            await this.onAlias(data.clientId, data.alias, true);
 
         await this.notifyAccept(data.boundAlias, data.clientAlias);
 
@@ -349,7 +347,7 @@ export class SignalingClient extends SignalingService {
       isConnectionAlias,
     });
 
-    await this.asyncResolver.emit(
+await this.asyncResolver.emit(
       this.getConnectionKey(clientConnectionId),
       JSON.stringify({ set, alias, isConnectionAlias })
     );
@@ -366,11 +364,6 @@ export class SignalingClient extends SignalingService {
   }
 
   private async notifyAccept(boundAlias: string, clientAlias: string) {
-    this.logger.silly("Notifying accept", {
-      boundAlias,
-      clientAlias,
-    });
-
     await this.asyncResolver.emit(this.getAcceptKey(boundAlias), clientAlias);
   }
 
